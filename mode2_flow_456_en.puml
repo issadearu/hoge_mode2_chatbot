@@ -1,0 +1,105 @@
+@startuml Mode2_OTP_AssumeRole_EC2_EN
+!theme plain
+skinparam backgroundColor #0f1117
+skinparam defaultFontColor #e0e0e0
+skinparam defaultFontSize 12
+skinparam ArrowColor #4fc3f7
+skinparam SequenceLifeLineBorderColor #4fc3f7
+
+skinparam SequenceDividerBackgroundColor #1565c0
+skinparam SequenceDividerBorderColor #4fc3f7
+skinparam SequenceDividerFontColor #ffffff
+skinparam SequenceDividerFontSize 13
+skinparam SequenceDividerFontStyle bold
+
+skinparam participantBackgroundColor #1e3a5f
+skinparam participantBorderColor #4fc3f7
+skinparam participantFontColor #e0e0e0
+
+skinparam actorBackgroundColor #1e3a5f
+skinparam actorBorderColor #4fc3f7
+skinparam actorFontColor #e0e0e0
+
+skinparam noteBackgroundColor #12263a
+skinparam noteBorderColor #1565c0
+skinparam noteFontColor #b3e5fc
+
+title Mode2 NML Ops Chatbot — OTP / AssumeRole / EC2 Operation
+
+actor "User\n(Browser)" as User
+participant "ECS / Fargate\n[mode2-ecs-task-role]" as ECS
+participant "Lambda\nOTP Function\n[mode2-lambda-otp-role]" as Lambda
+participant "DynamoDB\nChatBot-OTP-Verification" as DDB
+participant "SES\nEmail Service" as SES
+participant "STS\nAssumeRole" as STS
+participant "Target Account\nmode2-ops-role" as TargetRole
+participant "EC2 / RDS\n(mode2-managed=true)" as EC2
+
+== ④ OTP Two-Factor Authentication (Required before EC2 operations) ==
+
+note over ECS, Lambda
+  🔐 All EC2/RDS operations require OTP verification
+  This acts as a safety mechanism against accidental or unauthorized changes
+end note
+
+ECS -> Lambda : Request OTP generation\n(user email, operation type)
+Lambda -> Lambda : Generate 6-digit OTP randomly
+Lambda -> DDB : Store OTP temporarily\n(TTL: 10 min, status: pending)
+
+note right of Lambda
+  ⚠️ Must remove before production release:
+  print(f"Generated OTP: {otp_code}")
+  ↑ OTP is exposed in logs — security risk
+end note
+
+Lambda -> SES : Send OTP email\nFrom: no-reply-security@mail.nissan.co.jp
+SES --> User : 📧 OTP email delivered
+
+User -> ECS : Enter and submit OTP code
+ECS -> Lambda : OTP validation request
+Lambda -> DDB : Verify OTP\n(check expiry + used flag)
+DDB --> Lambda : Verification result
+Lambda --> ECS : ✅ OTP verified — operation permitted
+
+== ⑤ Cross-Account Access via STS AssumeRole ==
+
+note over ECS, STS
+  🔑 ECS cannot operate EC2 directly
+  ECS borrows temporary credentials via STS to perform operations
+end note
+
+ECS -> STS : AssumeRole request\nTarget role: mode2-ops-role\nShared secret (ExternalId): mode2-chatbot-trusted
+
+note right of STS
+  Supported target accounts:
+  - B2C       NonProd / Prod
+  - Internal  NonProd / Prod
+  - Gamma     NonProd / Prod
+  * Access denied if ExternalId does not match
+end note
+
+STS -> TargetRole : Validate Trust Policy\n(Verify Principal + ExternalId)
+TargetRole --> STS : Trust policy validated
+STS --> ECS : Issue temporary credentials\n(Valid for 15 min – 1 hour)
+
+== ⑥ EC2 / RDS Operation Execution and Notification ==
+
+note over ECS, EC2
+  🏷️ Only instances tagged with "mode2-managed = true"
+  can be operated. Untagged instances are blocked.
+end note
+
+ECS -> EC2 : Execute EC2/RDS operation\n(Start / Stop / Reboot / Describe)
+
+note right of EC2
+  IAM Condition key:
+  ec2:ResourceTag/mode2-managed = true
+  → Untagged instances are denied at IAM level
+end note
+
+EC2 --> ECS : Return operation result
+ECS -> SES : Send completion notification\n(to operator + team)
+SES --> User : ✅ Operation complete email received
+ECS --> User : Display result in browser
+
+@enduml

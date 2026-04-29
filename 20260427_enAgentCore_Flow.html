@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mode2 NML Ops Chatbot — Permission Architecture Diagram</title>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; margin: 0; padding: 20px; }
+  h1 { text-align: center; color: #4fc3f7; font-size: 1.8em; margin-bottom: 8px; }
+  h2 { color: #81d4fa; border-left: 4px solid #4fc3f7; padding-left: 12px; margin-top: 40px; }
+  h3 { color: #b3e5fc; }
+  .subtitle { text-align: center; color: #90a4ae; margin-bottom: 30px; }
+  .section { background: #1a1d27; border: 1px solid #2a2d3a; border-radius: 10px; padding: 24px; margin-bottom: 28px; }
+  .flow-box { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; margin: 20px 0; }
+  .flow-item { background: #1e3a5f; border: 1px solid #4fc3f7; border-radius: 8px; padding: 12px 18px; text-align: center; min-width: 100px; }
+  .flow-arrow { color: #4fc3f7; font-size: 1.4em; }
+  .layer-box { display: flex; gap: 16px; flex-wrap: wrap; margin: 16px 0; }
+  .layer { flex: 1; min-width: 220px; background: #12263a; border: 1px solid #1565c0; border-radius: 8px; padding: 16px; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; font-size: 0.85em; color: #c9d1d9; }
+  .allow { color: #4caf50; }
+  .deny { color: #f44336; }
+  .warn { color: #ff9800; }
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+  th { background: #1565c0; color: white; padding: 10px; text-align: left; }
+  td { padding: 10px; border-bottom: 1px solid #2a2d3a; vertical-align: top; }
+  tr:hover { background: #1a2744; }
+  .tag { display: inline-block; background: #1565c0; color: white; border-radius: 4px; padding: 2px 8px; font-size: 0.8em; margin: 2px; }
+  .tag.red { background: #b71c1c; }
+  .tag.green { background: #1b5e20; }
+  .tag.orange { background: #e65100; }
+  .step { display: flex; gap: 16px; margin: 16px 0; align-items: flex-start; }
+  .step-num { background: #1565c0; color: white; border-radius: 50%; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; font-weight: bold; flex-shrink: 0; }
+  .step-content { flex: 1; }
+  footer { text-align: center; color: #546e7a; margin-top: 40px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<h1>Mode2 NML Ops Chatbot — Permission Architecture Diagram</h1>
+<p class="subtitle">IAM Permissions · Cross-Account Access · Authorization Design for Each Component</p>
+
+<!-- Overview -->
+<div class="section">
+  <h2>Overview — Permission Flow Summary</h2>
+  <p>The permission flow from a user operating the Chatbot to controlling EC2. A different authentication/authorization mechanism operates at each step.</p>
+
+  <div class="flow-box">
+    <div class="flow-item">👤 User<br><small>IDP/Cognito</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">🌐 ALB<br><small>HTTPS</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">🐳 ECS/Fargate<br><small>Task Role</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">🤖 AgentCore<br><small>Runtime Role</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">🔑 Jump Account<br><small>sts:AssumeRole</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">☁️ Each AWS Account<br><small>EC2/RDS Operations</small></div>
+  </div>
+
+  <p><strong>3-Layer Permission Structure:</strong></p>
+  <ul>
+    <li>① <strong>User Authentication:</strong> Cognito + IDP (who is accessing)</li>
+    <li>② <strong>Service-to-Service Authorization:</strong> IAM Role (what each AWS service can do)</li>
+    <li>③ <strong>Cross-Account:</strong> sts:AssumeRole (operating resources in other accounts)</li>
+  </ul>
+</div>
+
+<!-- Section 1 -->
+<div class="section">
+  <h2>① User Authentication — Cognito + IDP Configuration</h2>
+  <p>Authentication flow when a user accesses from a web browser. Achieves SSO by integrating with IDP.</p>
+
+  <div class="layer-box">
+    <div class="layer">
+      <h3>Cognito User Pool Settings</h3>
+      <ul>
+        <li>IDP federation configuration</li>
+        <li>User group: <code>mode2-ops-users</code></li>
+        <li>MFA: Required (OTP email)</li>
+        <li>Token expiry: 1 hour</li>
+      </ul>
+    </div>
+    <div class="layer">
+      <h3>Cognito Identity Pool Settings</h3>
+      <ul>
+        <li>Assigns IAM role to authenticated users</li>
+        <li>Authenticated Role: <code>mode2-cognito-auth-role</code></li>
+        <li>Only API calls via ALB are permitted</li>
+      </ul>
+    </div>
+  </div>
+
+<pre>
+// IAM Role for Cognito Authenticated Users (Least Privilege)
+{
+  "Effect": "Allow",
+  "Action": [
+    "execute-api:Invoke"  // Only API calls via ALB
+  ],
+  "Resource": "arn:aws:execute-api:ap-northeast-1:COMMON_ACCOUNT:*"
+}
+</pre>
+
+  <p><strong>OTP Two-Factor Authentication Flow:</strong><br>
+  Cognito Auth → Portal Login → Lambda(login_auth) → DynamoDB Save → SES Email → User enters OTP → Lambda(validate) → Access Granted</p>
+</div>
+
+<!-- Section 2 -->
+<div class="section">
+  <h2>② ECS Task Role — Fargate Container Permissions</h2>
+  <p>Permissions for ECS/Fargate containers to call AWS services. This is the "core" permission of the Chatbot.</p>
+
+<pre>
+// ECS Task Role: mode2-ecs-task-role
+// Trust Policy (allows ECS tasks to assume this role)
+{
+  "Principal": { "Service": "ecs-tasks.amazonaws.com" },
+  "Action": "sts:AssumeRole"
+}
+
+// Permission Policy
+{
+  "Statement": [
+    // 1. Bedrock invocation
+    { "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+      "Resource": "arn:aws:bedrock:ap-northeast-1::foundation-model/*" },
+
+    // 2. AgentCore operations
+    { "Action": "bedrock-agentcore:*", "Resource": "*" },
+
+    // 3. DynamoDB (OTP management)
+    { "Action": ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:ap-northeast-1:*:table/ChatBot-OTP-Verification" },
+
+    // 4. Secrets Manager (retrieve credentials)
+    { "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-northeast-1:*:secret:mode2-*" },
+
+    // 5. Cross-account AssumeRole (most critical)
+    { "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/mode2-ops-cross-account-role" }
+  ]
+}
+</pre>
+
+  <div class="layer-box">
+    <div class="layer">
+      <span class="allow">✅ Allowed — Bedrock</span>
+      <ul><li>Claude Sonnet / Haiku</li><li>Titan Embeddings</li><li>Knowledge Base search</li></ul>
+    </div>
+    <div class="layer">
+      <span class="allow">✅ Allowed — AgentCore</span>
+      <ul><li>Runtime invocation</li><li>Memory read/write</li><li>Observability</li></ul>
+    </div>
+    <div class="layer">
+      <span class="deny">❌ Denied — Direct EC2 Operations</span>
+      <ul><li>Direct EC2 operations not allowed</li><li>Must go through AssumeRole</li><li>(for audit trail)</li></ul>
+    </div>
+  </div>
+</div>
+
+<!-- Section 3 -->
+<div class="section">
+  <h2>③ Cross-Account — Jump Account → Each Target Account</h2>
+  <p>Mechanism for the Chatbot to operate EC2/RDS across multiple AWS accounts (B2C, Internal, Gamma). Temporary credentials are obtained via sts:AssumeRole.</p>
+
+  <div class="flow-box">
+    <div class="flow-item">Common Account<br><small>ECS Task Role</small></div>
+    <div class="flow-arrow">→ sts:AssumeRole →</div>
+    <div class="flow-item">Each Account<br><small>mode2-ops-role</small></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-item">EC2/RDS<br><small>Operations</small></div>
+  </div>
+
+  <div class="layer-box">
+    <div class="layer">
+      <h3>Common Account Side (caller)</h3>
+<pre>
+// Policy attached to ECS Task Role
+{
+  "Effect": "Allow",
+  "Action": "sts:AssumeRole",
+  "Resource": [
+    "arn:aws:iam::B2C_NONPROD_ID:role/mode2-ops-role",
+    "arn:aws:iam::B2C_PROD_ID:role/mode2-ops-role",
+    "arn:aws:iam::INTERNAL_NONPROD_ID:role/mode2-ops-role",
+    "arn:aws:iam::INTERNAL_PROD_ID:role/mode2-ops-role",
+    "arn:aws:iam::GAMMA_NONPROD_ID:role/mode2-ops-role",
+    "arn:aws:iam::GAMMA_PROD_ID:role/mode2-ops-role"
+  ]
+}
+</pre>
+    </div>
+    <div class="layer">
+      <h3>Each Target Account Side (receiver)</h3>
+<pre>
+// mode2-ops-role Trust Policy
+{
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "arn:aws:iam::COMMON_ACCOUNT_ID:role/mode2-ecs-task-role"
+  },
+  "Action": "sts:AssumeRole",
+  "Condition": {
+    "StringEquals": {
+      "sts:ExternalId": "mode2-chatbot-trusted"
+    }
+  }
+}
+</pre>
+    </div>
+  </div>
+
+<pre>
+// mode2-ops-role Permission Policy (created in each target account)
+{
+  "Statement": [
+    // EC2 operations (start, stop, reboot, status check)
+    { "Action": [
+      "ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances",
+      "ec2:DescribeInstances", "ec2:DescribeInstanceStatus"
+    ], "Resource": "*",
+    // Tag condition: only instances with mode2-managed=true can be operated
+    "Condition": { "StringEquals": { "ec2:ResourceTag/mode2-managed": "true" } } },
+
+    // RDS operations (start, stop, status check)
+    { "Action": [
+      "rds:StartDBInstance", "rds:StopDBInstance",
+      "rds:DescribeDBInstances", "rds:DescribeDBClusters"
+    ], "Resource": "*" },
+
+    // CloudWatch (logs and metrics)
+    { "Action": ["cloudwatch:GetMetricData", "logs:GetLogEvents", "logs:DescribeLogGroups"],
+      "Resource": "*" }
+  ]
+}
+</pre>
+
+  <p><strong>Why use ExternalId:</strong><br>
+  To prevent the "Confused Deputy Problem." Without ExternalId, a malicious third party who knows the Common Account role ARN could attempt AssumeRole. Setting ExternalId ensures only legitimate Chatbot calls are accepted.</p>
+</div>
+
+<!-- Section 4 -->
+<div class="section">
+  <h2>④ AgentCore / Lambda — Role Configuration for Each Service</h2>
+
+  <div class="layer-box">
+    <div class="layer">
+      <h3>AgentCore Runtime Role</h3>
+<pre>
+// Trust Policy
+{ "Principal": {
+  "Service": "bedrock-agentcore.amazonaws.com"
+}, "Action": "sts:AssumeRole" }
+
+// Permissions
+[
+  "bedrock:InvokeModel",
+  "bedrock-agentcore:CreateEvent",
+  "bedrock-agentcore:RetrieveMemoryRecords",
+  "bedrock-agentcore:GetMemory",
+  "s3:GetObject"  // Knowledge Base
+]
+</pre>
+    </div>
+    <div class="layer">
+      <h3>Lambda OTP Function Role</h3>
+<pre>
+// Trust Policy
+{ "Principal": {
+  "Service": "lambda.amazonaws.com"
+}, "Action": "sts:AssumeRole" }
+
+// Permissions
+[
+  "dynamodb:PutItem",
+  "dynamodb:GetItem",
+  "dynamodb:UpdateItem",
+  "dynamodb:DeleteItem",
+  "dynamodb:Scan",
+  "ses:SendEmail",
+  "ses:SendRawEmail",
+  "logs:CreateLogGroup",
+  "logs:PutLogEvents"
+]
+</pre>
+    </div>
+  </div>
+</div>
+
+<!-- Section 5 -->
+<div class="section">
+  <h2>⑤ OTP Authentication Flow — Two-Factor Auth for EC2 Operations</h2>
+  <p>Before performing dangerous operations such as starting or stopping EC2, identity is verified via OTP.</p>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-content"><strong>User requests EC2 operation</strong><br>User asks Chatbot to stop EC2, etc. → Strands Agent calls OTP generation Lambda</div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-content"><strong>Lambda: Generate OTP → Save to DynamoDB</strong><br>Generates 6-digit code → Saves to ChatBot-OTP-Verification table (TTL: 10 min)<br><span class="warn">⚠ Note: Current code outputs OTP to CloudWatch Logs — must be removed before production</span></div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-content"><strong>Send OTP email via SES</strong><br>Sends 6-digit code to user's email address<br>Sender: no-reply-security@mail.nissan.co.jp</div>
+  </div>
+  <div class="step">
+    <div class="step-num">4</div>
+    <div class="step-content"><strong>User enters OTP → Lambda: Validation</strong><br>Verifies against DynamoDB (expiry check, used-flag check) → EC2 operation permitted on success</div>
+  </div>
+  <div class="step">
+    <div class="step-num">5</div>
+    <div class="step-content"><strong>Connect to target account via sts:AssumeRole → Execute EC2 operation</strong><br>Obtains temporary credentials (15 min–1 hour) to operate EC2<br>After operation, sends completion notification email to team and user</div>
+  </div>
+</div>
+
+<!-- Permission Matrix -->
+<div class="section">
+  <h2>Permission Matrix — Permissions by Component</h2>
+  <table>
+    <tr>
+      <th>Component</th>
+      <th>IAM Role Name</th>
+      <th>Key Permissions</th>
+      <th>Restrictions / Conditions</th>
+    </tr>
+    <tr>
+      <td>ECS Task<br>Fargate</td>
+      <td><code>mode2-ecs-task-role</code></td>
+      <td>
+        <span class="tag">bedrock:InvokeModel</span>
+        <span class="tag">bedrock-agentcore:*</span>
+        <span class="tag">dynamodb:CRUD</span>
+        <span class="tag">sts:AssumeRole</span>
+        <span class="tag">secretsmanager:Get</span>
+      </td>
+      <td>AssumeRole target is mode2-ops-role only</td>
+    </tr>
+    <tr>
+      <td>AgentCore Runtime</td>
+      <td><code>mode2-agentcore-role</code></td>
+      <td>
+        <span class="tag">bedrock:InvokeModel</span>
+        <span class="tag">bedrock-agentcore:Memory</span>
+        <span class="tag">s3:GetObject</span>
+      </td>
+      <td>Knowledge Base S3 bucket only</td>
+    </tr>
+    <tr>
+      <td>Lambda OTP</td>
+      <td><code>mode2-lambda-otp-role</code></td>
+      <td>
+        <span class="tag">dynamodb:CRUD</span>
+        <span class="tag">ses:SendEmail</span>
+        <span class="tag">logs:PutLogEvents</span>
+      </td>
+      <td>OTP table only / SES sender domain restriction</td>
+    </tr>
+    <tr>
+      <td>mode2-ops-role<br>(each target account)</td>
+      <td><code>mode2-ops-role</code></td>
+      <td>
+        <span class="tag">ec2:Start/Stop/Reboot</span>
+        <span class="tag">ec2:Describe*</span>
+        <span class="tag">rds:Start/Stop</span>
+        <span class="tag">cloudwatch:Get</span>
+      </td>
+      <td>Resources with mode2-managed=true tag only<br>ExternalId required</td>
+    </tr>
+    <tr>
+      <td>Cognito Auth Role</td>
+      <td><code>mode2-cognito-auth-role</code></td>
+      <td>
+        <span class="tag">execute-api:Invoke</span>
+      </td>
+      <td>Common Account API only</td>
+    </tr>
+  </table>
+
+  <p><strong>Principle of Least Privilege:</strong></p>
+  <ul>
+    <li>ECS Task Role cannot directly operate EC2 → must go through AssumeRole (audit trail is preserved)</li>
+    <li>mode2-ops-role can only operate resources tagged with <code>mode2-managed=true</code></li>
+    <li>OTP Lambda can only access the specific DynamoDB table</li>
+    <li>All operations are recorded in CloudTrail</li>
+  </ul>
+</div>
+
+<!-- Improvement Points -->
+<div class="section">
+  <h2>⚠ Improvement Points — Current Code Issues and Recommendations</h2>
+  <table>
+    <tr>
+      <th>Issue</th>
+      <th>Risk</th>
+      <th>Recommended Action</th>
+      <th>Priority</th>
+    </tr>
+    <tr>
+      <td>OTP code output to CloudWatch Logs</td>
+      <td>Anyone with log access can obtain the OTP</td>
+      <td>Remove <code>print(f"Generated OTP: {otp_code}")</code></td>
+      <td><span class="tag red">High</span></td>
+    </tr>
+    <tr>
+      <td>SMTP password managed via environment variable</td>
+      <td>Environment variables may be visible in plaintext</td>
+      <td>Migrate to Secrets Manager or use SES SDK (IAM role)</td>
+      <td><span class="tag red">High</span></td>
+    </tr>
+    <tr>
+      <td>DynamoDB client re-initialized on every call</td>
+      <td>Connection overhead on every Lambda execution</td>
+      <td>Initialize once in global scope</td>
+      <td><span class="tag orange">Medium</span></td>
+    </tr>
+    <tr>
+      <td>mode2-ops-role has no ExternalId</td>
+      <td>Risk of Confused Deputy attack</td>
+      <td>Add ExternalId condition to Trust Policy</td>
+      <td><span class="tag orange">Medium</span></td>
+    </tr>
+    <tr>
+      <td>No tag condition on EC2 operations</td>
+      <td>All EC2 instances in the account can be operated</td>
+      <td>Add mode2-managed=true tag condition to IAM policy</td>
+      <td><span class="tag orange">Medium</span></td>
+    </tr>
+  </table>
+</div>
+
+<footer>Mode2 NML Ops Chatbot Permission Design Document | Common Account: ap-northeast-1 | Created: 2026</footer>
+
+</body>
+</html>

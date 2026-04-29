@@ -1,0 +1,136 @@
+@startuml Mode2_NML_Ops_Chatbot_System_Flow
+
+!theme plain
+skinparam backgroundColor #0f1117
+skinparam defaultFontColor #e0e0e0
+skinparam defaultFontSize 12
+skinparam ArrowColor #4fc3f7
+skinparam SequenceLifeLineBorderColor #4fc3f7
+
+' ── Fix section divider (== ... ==) readability ──
+skinparam SequenceDividerBackgroundColor #1565c0
+skinparam SequenceDividerBorderColor #4fc3f7
+skinparam SequenceDividerFontColor #ffffff
+skinparam SequenceDividerFontSize 13
+skinparam SequenceDividerFontStyle bold
+
+skinparam participant {
+  BackgroundColor #1e3a5f
+  BorderColor #4fc3f7
+  FontColor #e0e0e0
+}
+
+skinparam actor {
+  BackgroundColor #1e3a5f
+  BorderColor #4fc3f7
+  FontColor #e0e0e0
+}
+
+skinparam note {
+  BackgroundColor #12263a
+  BorderColor #1565c0
+  FontColor #b3e5fc
+}
+
+title Mode2 NML Ops Chatbot — Full System & Permission Flow
+
+actor "User\n(Browser)" as User
+participant "IDP / Cognito\nUser Pool" as Cognito
+participant "ALB\n(HTTPS)" as ALB
+participant "ECS / Fargate\n[mode2-ecs-task-role]" as ECS
+participant "Lambda\nOTP Function\n[mode2-lambda-otp-role]" as Lambda
+participant "DynamoDB\nChatBot-OTP-Verification" as DDB
+participant "SES\nEmail Service" as SES
+participant "AgentCore Runtime\n[mode2-agentcore-role]" as AgentCore
+participant "Bedrock LLM\n(Claude Sonnet/Haiku)" as Bedrock
+participant "Knowledge Base\n(S3 + Titan Embeddings)" as KB
+participant "STS\nAssumeRole" as STS
+participant "Target Account\nmode2-ops-role" as TargetRole
+participant "EC2 / RDS\n(mode2-managed=true)" as EC2
+
+== ① User Authentication (Cognito + IDP) ==
+
+User -> Cognito : Login request (SSO via IDP)
+Cognito -> Cognito : MFA / OTP email verification
+Cognito --> User : JWT Token (1 hour expiry)
+
+note right of Cognito
+  Authenticated Role:
+  mode2-cognito-auth-role
+  → execute-api:Invoke only
+end note
+
+== ② Request Routing via ALB ==
+
+User -> ALB : HTTPS request + JWT Token
+ALB -> ALB : Verify Cognito JWT
+ALB -> ECS : Forward authenticated request
+
+== ③ ECS / Fargate — Chatbot Processing ==
+
+ECS -> AgentCore : Invoke AgentCore Runtime\n(bedrock-agentcore:*)
+AgentCore -> Bedrock : InvokeModel\n(Claude Sonnet / Haiku)
+AgentCore -> KB : Retrieve relevant documents\n(Titan Embeddings + S3)
+KB --> AgentCore : Return context documents
+Bedrock --> AgentCore : LLM response
+AgentCore --> ECS : Agent response with action plan
+
+== ④ OTP Two-Factor Authentication (for EC2 operations) ==
+
+ECS -> Lambda : Request OTP generation\n(user email, operation type)
+Lambda -> Lambda : Generate 6-digit OTP
+Lambda -> DDB : Save OTP\n(TTL: 10 min, status: pending)
+
+note right of Lambda
+  ⚠ Remove before production:
+  print(f"Generated OTP: {otp_code}")
+end note
+
+Lambda -> SES : Send OTP email\n(no-reply-security@mail.nissan.co.jp)
+SES --> User : OTP email delivered
+
+User -> ECS : Submit OTP code
+ECS -> Lambda : Validate OTP
+Lambda -> DDB : Verify OTP\n(check expiry + used flag)
+DDB --> Lambda : Validation result
+Lambda --> ECS : ✅ OTP verified — operation permitted
+
+== ⑤ Cross-Account Access via sts:AssumeRole ==
+
+ECS -> STS : AssumeRole request\n(Resource: mode2-ops-role)\n(ExternalId: mode2-chatbot-trusted)
+
+note right of STS
+  Supported target accounts:
+  - B2C NonProd / Prod
+  - Internal NonProd / Prod
+  - Gamma NonProd / Prod
+end note
+
+STS -> TargetRole : Verify Trust Policy\n(Principal + ExternalId check)
+TargetRole --> STS : Trust verified
+STS --> ECS : Temporary credentials\n(valid 15 min – 1 hour)
+
+== ⑥ EC2 / RDS Operation Execution ==
+
+ECS -> EC2 : EC2/RDS operation\n(Start / Stop / Reboot / Describe)
+
+note right of EC2
+  IAM Condition:
+  ec2:ResourceTag/mode2-managed = true
+  → Only tagged instances can be operated
+end note
+
+EC2 --> ECS : Operation result
+ECS -> SES : Send completion notification\n(to user + team)
+SES --> User : ✅ Operation complete email
+ECS --> ALB : Response
+ALB --> User : Display result in browser
+
+== CloudTrail Audit (all operations recorded) ==
+
+note over ECS, EC2
+  All operations (AssumeRole, EC2 Start/Stop, RDS operations)
+  are recorded in AWS CloudTrail for audit purposes.
+end note
+
+@enduml
